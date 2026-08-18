@@ -216,6 +216,11 @@ def main():
                      help='абляция: 3D-conv голова без камеры (сравнение с fusion)')
     ap.add_argument('--unfreeze-backbone', action='store_true',
                      help='дообучать ResNet18, а не только голову/view_transform')
+    ap.add_argument('--clip-grad', type=float, default=0.0,
+                     help='max_norm для градиентного клиппинга, 0 = выключено. '
+                          'В настоящем конфиге BEVFusion используется 35 -- '
+                          'на smoke-тесте fusion-режим давал нестабильный val IoU '
+                          '(скачки 0.11..0.38) при гладком train loss, это первое, что стоит попробовать')
     args = ap.parse_args()
 
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -271,6 +276,10 @@ def main():
                 logits, tgt = forward_batch(batch)
                 loss = F.cross_entropy(logits, tgt, weight=w)
             scaler.scale(loss).backward()
+            if args.clip_grad > 0:
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in net.parameters() if p.requires_grad], args.clip_grad)
             scaler.step(opt); scaler.update(); sched.step()
             tot += loss.item()
         print(f'epoch {ep}  loss {tot / max(len(dl_tr),1):.4f}  {time.time()-t0:.0f}s')
