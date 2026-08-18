@@ -186,8 +186,14 @@ class CameraLSS(nn.Module):
         feat = feat * valid
 
         bev = feat.new_zeros(B, NX * NY, C)
+        cnt = feat.new_zeros(B, NX * NY, 1)
         for b in range(B):                                            # индексы разные на каждый сэмпл
             bev[b].index_add_(0, flat_idx[b], feat[b])
+            cnt[b].index_add_(0, flat_idx[b], valid[b])
+        bev = bev / cnt.clamp(min=1.0)                                 # среднее, не сумма --
+        # иначе клетки рядом с камерой (много лучей на малой глубине)
+        # получают на порядки больший масштаб признаков, чем дальние,
+        # и забивают BatchNorm первого слоя шумом единого знака по всей сетке
         return bev.reshape(B, NX, NY, C).permute(0, 3, 1, 2)           # (B, C, NX, NY)
 
 
