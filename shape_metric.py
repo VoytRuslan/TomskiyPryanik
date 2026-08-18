@@ -16,6 +16,14 @@
 инстанса с шаблоном -- "мягкий" Dice: 2*sum(template*pred)/(sum(template)+
 sum(pred)), шаблон непрерывный [0,1], порог не нужен.
 
+Нормировка тоже разная: box-классы нормируются под ФИЗИЧЕСКИЙ размер бокса
+(box.wlh) -- лидар часто видит объект только частично, и нормировка под
+собственный extent растягивала бы огрызок из нескольких вокселей и полный
+силуэт под один и тот же unit-cube по-разному, размазывая усреднённый шаблон
+(так и было в первой версии -- self-check gt-vs-template показал ~0.05-0.1
+вместо ожидаемых заметно бОльших значений). Blob-классы (manmade/vegetation)
+нормируются под собственный extent -- для них истинного размера объекта нет.
+
 Не применимо к road/sidewalk/terrain -- это не дискретные объекты, а сплошная
 поверхность на всю сцену, "форма дороги" не имеет смысла.
 
@@ -75,6 +83,22 @@ def soft_dice(template, instance_bool):
     return 2 * inter / max(float(template.sum() + instance_bool.sum()), 1e-6)
 
 
+def normalize_resample_fixed(local_xyz, extent, out_shape=OUT_SHAPE):
+    """То же, что normalize_resample, но нормирует под ЗАДАННЫЙ физический
+    размер (extent = (l,w,h) бокса), а не под min/max самих точек. Для боксовых
+    классов это критично: лидар часто видит инстанс только частично (окклюзия,
+    дальность), и нормировка под собственный bbox растягивает 6-вокссельный
+    огрызок и полные 60 вокселей под один и тот же unit-cube по-разному,
+    размазывая усреднённый шаблон."""
+    lo = -np.array(extent) / 2.0
+    span = np.maximum(np.array(extent), 1e-6)
+    norm = (local_xyz - lo) / span
+    idx = np.clip(np.floor(norm * np.array(out_shape)).astype(np.int64), 0, np.array(out_shape) - 1)
+    grid = np.zeros(out_shape, dtype=np.float32)
+    grid[idx[:, 0], idx[:, 1], idx[:, 2]] = 1.0
+    return grid
+
+
 # ============================================================
 #  ИЗВЛЕЧЕНИЕ ИНСТАНСОВ: barrier / traffic_cone / pedestrian (реальные боксы)
 # ============================================================
@@ -117,18 +141,21 @@ def extract_box_instance(sem_grid, pred_grid, box, class_id, min_voxels):
 
     inside = (np.abs(lx) < l / 2 + pad) & (np.abs(ly) < w / 2 + pad) & (np.abs(lz) < h / 2 + pad)
 
+    extent = (l, w, h)                                     # физический размер бокса -- см. normalize_resample_fixed
+
     sem_block = sem_grid[ix_lo:ix_hi, iy_lo:iy_hi, iz_lo:iz_hi]
     gt_mask = inside & (sem_block == class_id)
     if gt_mask.sum() < min_voxels:
         return None
-    gt_shape = normalize_resample(np.stack([lx[gt_mask], ly[gt_mask], lz[gt_mask]], axis=1))
+    gt_shape = normalize_resample_fixed(np.stack([lx[gt_mask], ly[gt_mask], lz[gt_mask]], axis=1), extent)
 
     pred_shape = None
     if pred_grid is not None:
         pred_block = pred_grid[ix_lo:ix_hi, iy_lo:iy_hi, iz_lo:iz_hi]
         pred_mask = inside & pred_block
         if pred_mask.sum() >= 1:
-            pred_shape = normalize_resample(np.stack([lx[pred_mask], ly[pred_mask], lz[pred_mask]], axis=1))
+            pred_shape = normalize_resample_fixed(
+                np.stack([lx[pred_mask], ly[pred_mask], lz[pred_mask]], axis=1), extent)
         else:
             pred_shape = np.zeros(OUT_SHAPE, dtype=np.float32)
 
@@ -221,7 +248,7 @@ def main():
     ap.add_argument('--ckpt', default='occ_baseline.pth')
     ap.add_argument('--limit', type=int, default=None, help='кадров всего (по умолчанию -- весь датасет)')
     ap.add_argument('--val-frac', type=float, default=0.2, help='доля СЦЕН на val')
-    ap.add_argument('--min-voxels', type=int, default=6, help='мин. вокселей, чтобы считать инстанс валидным')
+    ap.add_argument('--min-voxels', type=int, default=15, help='мин. вокселей, чтобы считать инстанс валидным')
     args = ap.parse_args()
 
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
