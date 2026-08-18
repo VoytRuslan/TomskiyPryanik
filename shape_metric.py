@@ -248,6 +248,7 @@ def main():
     template_sum = {c: np.zeros(OUT_SHAPE, dtype=np.float64) for c in CLASS_NAMES}
     template_cnt = {c: 0 for c in CLASS_NAMES}
     val_shapes = {c: [] for c in CLASS_NAMES}
+    val_gt_shapes = {c: [] for c in CLASS_NAMES}   # self-check: GT val-инстансы против шаблона
 
     t0 = time.time()
     n_val_frames = 0
@@ -277,6 +278,7 @@ def main():
                 continue
             gt_shape, pred_shape = res
             if is_val:
+                val_gt_shapes[cls_id].append(gt_shape)
                 if pred_shape is not None:
                     val_shapes[cls_id].append(pred_shape)
             else:
@@ -287,6 +289,7 @@ def main():
             for gt_shape, pred_shape in extract_blob_instances(sem, pred_grid if is_val else None,
                                                                 cls_id, args.min_voxels):
                 if is_val:
+                    val_gt_shapes[cls_id].append(gt_shape)
                     if pred_shape is not None:
                         val_shapes[cls_id].append(pred_shape)
                 else:
@@ -295,15 +298,22 @@ def main():
 
     print(f'обработка: {time.time()-t0:.0f}s (val-кадров с инференсом: {n_val_frames})\n')
 
-    print(f'{"класс":14s} {"train-инст.":>12s} {"val-инст.":>10s} {"similarity":>11s}')
+    # self-check: GT val-инстансы против шаблона -- должно быть заметно выше,
+    # чем pred-vs-шаблон, если геометрия/нормализация работают верно.
+    # Низко и там, и там -> баг в пайплайне. Низко только у pred -> честная
+    # находка про качество модели, а не про метрику.
+    print(f'{"класс":14s} {"train-инст.":>12s} {"val-инст.":>10s} {"pred-vs-templ":>14s} {"gt-vs-templ":>12s}')
     for c in CLASS_NAMES:
         if template_cnt[c] < 3:
             print(f'{CLASS_NAMES[c]:14s} {template_cnt[c]:12d}  -- мало train-инстансов, шаблон ненадёжен')
             continue
         template = (template_sum[c] / template_cnt[c]).astype(np.float32)
-        scores = [soft_dice(template, s) for s in val_shapes[c]]
-        mean_score = float(np.mean(scores)) if scores else float('nan')
-        print(f'{CLASS_NAMES[c]:14s} {template_cnt[c]:12d} {len(val_shapes[c]):10d} {mean_score:11.4f}')
+        pred_scores = [soft_dice(template, s) for s in val_shapes[c]]
+        gt_scores = [soft_dice(template, s) for s in val_gt_shapes[c]]
+        pred_mean = float(np.mean(pred_scores)) if pred_scores else float('nan')
+        gt_mean = float(np.mean(gt_scores)) if gt_scores else float('nan')
+        print(f'{CLASS_NAMES[c]:14s} {template_cnt[c]:12d} {len(val_shapes[c]):10d} '
+              f'{pred_mean:14.4f} {gt_mean:12.4f}')
 
 
 if __name__ == '__main__':
