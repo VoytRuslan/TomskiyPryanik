@@ -176,50 +176,9 @@ class Occ3DDataset(Dataset):
 
 
 # ============================================================
-#  МЕТРИКИ
+#  МЕТРИКИ -- вынесены в metrics.py (там же Dice и разбивка по Z-слоям)
 # ============================================================
-class Metrics:
-    """IoU по занятости + IoU по слоям высоты + ложные блокировки."""
-
-    ZONES = [('под колёсами', 0, None), ('габарит', None, None), ('над габаритом', None, NZ)]
-
-    def __init__(self):
-        self.i_clear, self.i_top = z_index(0.2), z_index(2.0)
-        self.inter = self.union = 0
-        self.zones = {n: [0, 0] for n, _, _ in self._zones()}
-        self.fb_pred = self.fb_gt = 0
-
-    def _zones(self):
-        return [('под колёсами', 0, self.i_clear),
-                ('габарит', self.i_clear, self.i_top),
-                ('над габаритом', self.i_top, NZ)]
-
-    @torch.no_grad()
-    def update(self, logits, target):
-        pred = logits.argmax(1)                              # (B,Z,H,W)
-        p, t = pred > 0, target > 0
-        self.inter += (p & t).sum().item()
-        self.union += (p | t).sum().item()
-
-        for name, lo, hi in self._zones():
-            ps, ts = p[:, lo:hi], t[:, lo:hi]
-            self.zones[name][0] += (ps & ts).sum().item()
-            self.zones[name][1] += (ps | ts).sum().item()
-
-        # ложные блокировки: плоская карта против габаритного коридора
-        for m, acc in ((p, 'fb_pred'), (t, 'fb_gt')):
-            flat = m.any(1)
-            real = m[:, self.i_clear:self.i_top].any(1)
-            setattr(self, acc, getattr(self, acc) + (flat & ~real).sum().item())
-
-    def report(self):
-        iou = self.inter / max(self.union, 1)
-        lines = [f'IoU занятости : {iou:.4f}']
-        for name, _, _ in self._zones():
-            i, u = self.zones[name]
-            lines.append(f'  IoU {name:14s}: {i / max(u, 1):.4f}')
-        lines.append(f'ложные блокировки: pred={self.fb_pred}  gt={self.fb_gt}')
-        return '\n'.join(lines)
+from metrics import Metrics
 
 
 # ============================================================
