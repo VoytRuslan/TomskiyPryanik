@@ -222,6 +222,8 @@ def main():
                           'на smoke-тесте fusion-режим давал нестабильный val IoU '
                           '(скачки 0.11..0.38) при гладком train loss, это первое, что стоит попробовать')
     ap.add_argument('--z-report', action='store_true', help='печатать разбивку IoU/Dice по всем 16 Z-слоям')
+    ap.add_argument('--gauge-report', action='store_true',
+                     help='печатать false-block/miss rate в % и кривую по габаритам 1.5-4 м')
     args = ap.parse_args()
 
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -293,6 +295,9 @@ def main():
         print(m.report())
         if args.z_report:
             print(m.report_z_layers())
+        if args.gauge_report:
+            print(m.report_passability())
+            print(m.report_gauge_curve())
 
     out = 'occ_bevfusion_nocam_check.pth' if args.no_cam else 'occ_bevfusion.pth'
     torch.save(net.state_dict(), out)

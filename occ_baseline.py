@@ -193,6 +193,8 @@ def main():
     ap.add_argument('--limit', type=int, default=None, help='взять только N кадров')
     ap.add_argument('--classes', type=int, default=2, help='2 = бинарно, 18 = семантика')
     ap.add_argument('--z-report', action='store_true', help='печатать разбивку IoU/Dice по всем 16 Z-слоям')
+    ap.add_argument('--gauge-report', action='store_true',
+                     help='печатать false-block/miss rate в % и кривую по габаритам 1.5-4 м')
     args = ap.parse_args()
 
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -247,6 +249,9 @@ def main():
         print(m.report())
         if args.z_report:
             print(m.report_z_layers())
+        if args.gauge_report:
+            print(m.report_passability())
+            print(m.report_gauge_curve())
 
     torch.save(net.state_dict(), 'occ_baseline.pth')
     print('веса сохранены в occ_baseline.pth')

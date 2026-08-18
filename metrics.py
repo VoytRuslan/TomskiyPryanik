@@ -9,11 +9,14 @@ occ_fusion.py, occ_bevfusion.py (раньше класс Metrics жил внут
     - IoU и Dice занятости (общие)
     - IoU и Dice по трём зонам высоты (под колёсами / габарит / над габаритом)
     - IoU и Dice по всем 16 Z-слоям отдельно (report_z_layers)
-    - счётчик ложных блокировок (плоская карта vs габаритный коридор)
+    - счётчик ложных блокировок, флэт-карта vs корридор (старое, для совместимости)
+    - false-block rate / miss rate в % -- честный FP/FN между предсказанием
+      и GT в габаритном коридоре, а не внутренний flat-vs-corridor трюк
+      (report_passability)
+    - кривая false-block/miss rate по габаритам машины 1.5-4 м, кейс М-4
+      (report_gauge_curve)
 
 Дальше по плану (см. CLAUDE.md, раздел "Метрики"):
-    - false-block rate / miss rate в процентах, а не счётчиком вокселей
-    - кривая false-block rate по габаритам машины (1.5-4 м, кейс М-4)
     - RayIoU -- брать готовую реализацию из github.com/MCG-NJU/SparseOcc
     - метрика формы (шаблон объекта в объектной системе координат)
 """
@@ -23,6 +26,7 @@ import torch
 VOX = 0.4
 Z_MIN = -1.0
 NZ = 16
+GAUGE_HEIGHTS = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0]   # легковушка -> фура, кейс М-4
 
 
 def z_index(z_m):
@@ -50,6 +54,16 @@ class Metrics:
         self.z_gt = np.zeros(n_z, dtype=np.int64)
 
         self.fb_pred = self.fb_gt = 0
+
+        # честный FP/FN между предсказанием и GT в габаритном коридоре,
+        # по нескольким высотам "потолка" сразу -- кривая по габаритам (кейс М-4)
+        self.gauge_heights = GAUGE_HEIGHTS
+        self.gauge_tops = [z_index(h) for h in GAUGE_HEIGHTS]
+        n = len(self.gauge_heights)
+        self.g_fp = np.zeros(n, dtype=np.int64)
+        self.g_fn = np.zeros(n, dtype=np.int64)
+        self.g_tp = np.zeros(n, dtype=np.int64)
+        self.g_tn = np.zeros(n, dtype=np.int64)
 
     def _zones(self):
         return [('под колёсами', 0, self.i_clear),
@@ -80,11 +94,22 @@ class Metrics:
         self.z_pred += p.sum(dim=(0, 2, 3)).cpu().numpy()
         self.z_gt += t.sum(dim=(0, 2, 3)).cpu().numpy()
 
-        # ложные блокировки: плоская карта против габаритного коридора
+        # ложные блокировки (старое, для совместимости): плоская карта против
+        # габаритного коридора -- внутри одного источника (либо pred, либо gt)
         for m, acc in ((p, 'fb_pred'), (t, 'fb_gt')):
             flat = m.any(1)
             real = m[:, self.i_clear:self.i_top].any(1)
             setattr(self, acc, getattr(self, acc) + (flat & ~real).sum().item())
+
+        # честный FP/FN pred-vs-gt в габаритном коридоре, по каждой высоте
+        # "потолка" из gauge_heights -- база для false-block/miss rate
+        for k, top in enumerate(self.gauge_tops):
+            pred_real = p[:, self.i_clear:top].any(1)
+            gt_real = t[:, self.i_clear:top].any(1)
+            self.g_tp[k] += (pred_real & gt_real).sum().item()
+            self.g_fp[k] += (pred_real & ~gt_real).sum().item()
+            self.g_fn[k] += (~pred_real & gt_real).sum().item()
+            self.g_tn[k] += (~pred_real & ~gt_real).sum().item()
 
     @staticmethod
     def _iou(inter, union):
@@ -114,4 +139,32 @@ class Metrics:
             iou = self._iou(self.z_inter[z], self.z_union[z])
             dice = self._dice(self.z_inter[z], self.z_pred[z], self.z_gt[z])
             lines.append(f'{z:3d}    {z_m:6.2f}       {iou:.4f}  {dice:.4f}')
+        return '\n'.join(lines)
+
+    @staticmethod
+    def _rates(fp, fn, tp, tn):
+        fbr = 100 * fp / max(fp + tn, 1)   # false-block rate: среди реально
+        mr = 100 * fn / max(fn + tp, 1)    # свободных / реально занятых columns
+        return fbr, mr
+
+    def report_passability(self):
+        """
+        False-block rate (лишние торможения) и miss rate (риск столкновения)
+        в % для габарита легковушки (2.0 м) -- честный FP/FN pred-vs-gt в
+        коридоре [0.2, 2.0) м, в отличие от fb_pred/fb_gt в report() (там
+        flat-vs-corridor внутри одного источника, без сравнения с другим).
+        """
+        k = self.gauge_heights.index(2.0)
+        fbr, mr = self._rates(self.g_fp[k], self.g_fn[k], self.g_tp[k], self.g_tn[k])
+        ratio = fbr / mr if mr > 0 else float('inf')
+        return (f'false-block rate: {fbr:.2f}%  (лишние торможения)\n'
+                f'miss rate       : {mr:.2f}%  (риск столкновения)\n'
+                f'соотношение fb/miss: {ratio:.2f}')
+
+    def report_gauge_curve(self):
+        """False-block/miss rate в % как функция габарита машины, 1.5-4 м (кейс М-4)."""
+        lines = ['высота, м   false-block%   miss%']
+        for k, h in enumerate(self.gauge_heights):
+            fbr, mr = self._rates(self.g_fp[k], self.g_fn[k], self.g_tp[k], self.g_tn[k])
+            lines.append(f'{h:6.1f}      {fbr:8.2f}     {mr:6.2f}')
         return '\n'.join(lines)
