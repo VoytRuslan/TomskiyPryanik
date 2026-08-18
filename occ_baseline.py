@@ -192,6 +192,7 @@ def main():
     ap.add_argument('--lr', type=float, default=2e-3)
     ap.add_argument('--limit', type=int, default=None, help='взять только N кадров')
     ap.add_argument('--classes', type=int, default=2, help='2 = бинарно, 18 = семантика')
+    ap.add_argument('--z-report', action='store_true', help='печатать разбивку IoU/Dice по всем 16 Z-слоям')
     args = ap.parse_args()
 
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -244,6 +245,8 @@ def main():
             for bev, tgt in dl_va:
                 m.update(net(bev.to(dev)), tgt.to(dev).permute(0, 3, 1, 2))
         print(m.report())
+        if args.z_report:
+            print(m.report_z_layers())
 
     torch.save(net.state_dict(), 'occ_baseline.pth')
     print('веса сохранены в occ_baseline.pth')
