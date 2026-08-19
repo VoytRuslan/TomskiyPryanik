@@ -72,9 +72,15 @@ class Metrics:
 
     @torch.no_grad()
     def update(self, logits, target):
-        """logits: (B, num_classes, Z, H, W); target: (B, Z, H, W)."""
+        """logits: (B, num_classes, Z, H, W); target: (B, Z, H, W).
+
+        target может содержать -100 (ignore_index) в вокселях вне маски
+        видимости -- такие воксели исключаются из всех метрик, а не
+        засчитываются как "свободно" (см. CLAUDE.md, "маски видимости").
+        """
         pred = logits.argmax(1)                               # (B,Z,H,W)
-        p, t = pred > 0, target > 0
+        valid = target != -100
+        p, t = (pred > 0) & valid, (target > 0) & valid
 
         self.inter += (p & t).sum().item()
         self.union += (p | t).sum().item()

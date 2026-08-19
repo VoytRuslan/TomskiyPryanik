@@ -69,7 +69,9 @@ class Occ3DCamDataset(Occ3DDataset):
     """
 
     def __init__(self, root='occ3d-nus', binary=True, limit=None, nusc=None):
-        super().__init__(root, binary, limit, nusc)
+        # 'union': видно лидаром ИЛИ камерой -- обе модальности участвуют
+        # во входе, значит обеим и разрешаем учить таргет
+        super().__init__(root, binary, limit, nusc, vis_mask='union')
         if nusc is None:
             raise ValueError('камерная ветка требует nuScenes devkit '
                               '(для лидарной абляции используйте --no-cam)')
@@ -277,7 +279,7 @@ def main():
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=(dev == 'cuda')):
                 logits, tgt = forward_batch(batch)
-                loss = F.cross_entropy(logits, tgt, weight=w)
+                loss = F.cross_entropy(logits, tgt, weight=w, ignore_index=-100)
             scaler.scale(loss).backward()
             if args.clip_grad > 0:
                 scaler.unscale_(opt)

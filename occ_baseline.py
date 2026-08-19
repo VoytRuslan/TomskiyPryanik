@@ -124,12 +124,13 @@ class Occ3DDataset(Dataset):
     binary=True -> таргет 0/1 (занято/свободно), это самый быстрый путь.
     """
 
-    def __init__(self, root='occ3d-nus', binary=True, limit=None, nusc=None):
+    def __init__(self, root='occ3d-nus', binary=True, limit=None, nusc=None, vis_mask='lidar'):
         self.root, self.binary = root, binary
         self.files = sorted(glob.glob(os.path.join(root, 'gts', '*', '*', 'labels.npz')))
         if limit:
             self.files = self.files[:limit]
         self.nusc = nusc
+        self.vis_mask = vis_mask   # 'lidar' | 'camera' | 'union' | None -- какую маску видимости брать
         assert self.files, f'не найдено labels.npz в {root}/gts'
 
     def __len__(self):
@@ -154,7 +155,8 @@ class Occ3DDataset(Dataset):
     def __getitem__(self, i):
         f = self.files[i]
         token = os.path.basename(os.path.dirname(f))
-        sem = np.load(f)['semantics']                       # (200,200,16)
+        npz = np.load(f)
+        sem = npz['semantics']                               # (200,200,16)
 
         pts = self._load_lidar(token)
         if pts is None:
@@ -172,6 +174,20 @@ class Occ3DDataset(Dataset):
             tgt = (sem != FREE).astype(np.int64)
         else:
             tgt = sem.astype(np.int64)
+
+        # маски видимости обязательны: без них модель фантазирует
+        # в ненаблюдаемом пространстве (см. CLAUDE.md, "критично помнить")
+        if self.vis_mask == 'lidar':
+            vis = npz['mask_lidar'].astype(bool)
+        elif self.vis_mask == 'camera':
+            vis = npz['mask_camera'].astype(bool)
+        elif self.vis_mask == 'union':
+            vis = npz['mask_lidar'].astype(bool) | npz['mask_camera'].astype(bool)
+        else:
+            vis = None
+        if vis is not None:
+            tgt[~vis] = -100                                 # ignore_index в лоссе и метриках
+
         return torch.from_numpy(bev), torch.from_numpy(tgt)
 
 
@@ -236,7 +252,7 @@ def main():
             tgt = tgt.permute(0, 3, 1, 2)                    # (B,Z,H,W)
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=(dev == 'cuda')):
-                loss = F.cross_entropy(net(bev), tgt, weight=w)
+                loss = F.cross_entropy(net(bev), tgt, weight=w, ignore_index=-100)
             scaler.scale(loss).backward()
             scaler.step(opt); scaler.update(); sched.step()
             tot += loss.item()
