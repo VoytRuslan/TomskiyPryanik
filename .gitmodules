@@ -1,0 +1,3 @@
+[submodule "FlashOCC"]
+	path = FlashOCC
+	url = https://github.com/AigulFar/FlashOCC.git
