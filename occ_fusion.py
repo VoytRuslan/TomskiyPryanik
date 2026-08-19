@@ -6,26 +6,32 @@ from pyquaternion import Quaternion
 """
 что сейчас сделано:
 
-- загрузила lidar point cloud из nuScenes
-- загрузила point-wise lidar segmentation
-- привела исходные nuScenes классы к 17 классам TPVFormer
-- перевела точки из lidar coordinates в occupancy grid 200x200x16
-- сделала ray casting от lidar до каждой точки
-- voxels до точки помечаем как free
-- voxel с точкой помечаем ее semantic class
-- сохраняем итоговые semantics и mask_lidar в npz
+- загрузка lidar point cloud из nuScenes
+- загрузка point-wise lidar segmentation
+- mapping исходных nuScenes классов в 17 классов TPVFormer
+- voxelization в occupancy grid 200x200x16 с размером voxel 0.4 м
+- генерация free space через ray casting от lidar origin до точки измерения
+- occupied voxels получают semantic class точки
+- сохранение occupancy representation в формате npz:
+    - semantics
+    - mask_lidar
 
-сейчас это базовая версия только для одного keyframe.
-накопленные lidar sweeps пока не использую.
-с текущим вариантом получено:
-- grid: 200x200x16
-- observed voxels: 73590
-- gt observed voxels: 54576
-- intersection с gt: 9506
-- mask iou: ~8%
+добавлено накопление lidar sweeps:
+- собираются несколько последовательных lidar кадров
+- sweep points переводятся в систему координат текущего keyframe
+- для каждой точки сохраняется соответствующий lidar origin,
+  чтобы корректно строить ray casting из позиции сенсора
 
-следующий шаг: добавить накопление lidar sweeps и перевод всех sweep points
-в систему координат текущего keyframe перед ray casting.
+текущий результат:
+- occupancy grid: 200x200x16
+- keyframe points: 34688
+- accumulated sweep points: 347232
+- accumulated origins: 347232
+
+следующие шаги:
+- использовать сохраненные sweep origins в ray casting вместо общего origin
+- проверить качество полученного occupancy относительно GT Occ3D
+- подготовить формат данных для дальнейшего подключения к BEVFusion / occupancy head
 """
 
 # =========================
@@ -112,7 +118,12 @@ def load_lidar_and_segmentation(nusc, sample_token, root):
 
     return points[:, :3], labels
 
-def lidar_seg_to_occ(points, labels):
+def lidar_seg_to_occ(
+    points,
+    labels,
+    extra_points=None,
+    extra_origins=None
+):
     """
     Convert point-wise LiDAR semantic segmentation
     into a voxel occupancy grid with free-space ray casting.
@@ -131,6 +142,18 @@ def lidar_seg_to_occ(points, labels):
         (NX, NY, NZ),
         dtype=np.uint8
     )
+
+    if extra_points is not None:
+        print(
+            "Extra LiDAR points:",
+            extra_points.shape
+        )
+        print(
+            "Extra LiDAR origins:",
+            extra_origins.shape
+        )
+
+        assert len(extra_points) == len(extra_origins)
 
     # --------------------------------------------------
     # 1. Convert LiDAR points to voxel coordinates
@@ -297,6 +320,90 @@ def lidar_seg_to_occ(points, labels):
             hit[2]
         ] = 1
 
+        # --------------------------------------------------
+    # Process sweep points without semantic labels
+    # --------------------------------------------------
+
+    if extra_points is not None:
+
+        print("Processing extra LiDAR rays...")
+
+        for point, origin in zip(extra_points, extra_origins):
+
+            distance = np.linalg.norm(point)
+
+            if distance == 0:
+                continue
+
+            num_steps = int(
+                np.ceil(distance / (VOXEL_SIZE / 2))
+            )
+
+            ts = np.linspace(
+                0.0,
+                1.0,
+                num_steps
+            )
+
+            ray_points = (
+                origin[None, :]
+                + ts[:, None] * (point - origin)
+            )
+
+            ray_voxels = np.floor(
+                (
+                    ray_points -
+                    np.array([X_MIN, Y_MIN, Z_MIN])
+                )
+                / VOXEL_SIZE
+            ).astype(np.int32)
+
+            _, indices = np.unique(
+                ray_voxels,
+                axis=0,
+                return_index=True
+            )
+
+            ray_voxels = ray_voxels[
+                np.sort(indices)
+            ]
+
+            valid = (
+                (ray_voxels[:, 0] >= 0) &
+                (ray_voxels[:, 0] < NX) &
+                (ray_voxels[:, 1] >= 0) &
+                (ray_voxels[:, 1] < NY) &
+                (ray_voxels[:, 2] >= 0) &
+                (ray_voxels[:, 2] < NZ)
+            )
+
+            ray_voxels = ray_voxels[valid]
+
+            if len(ray_voxels) == 0:
+                continue
+
+            free_voxels = ray_voxels[:-1]
+
+            semantics[
+                free_voxels[:,0],
+                free_voxels[:,1],
+                free_voxels[:,2]
+            ] = 17
+
+            # mask_lidar[
+            #     free_voxels[:,0],
+            #     free_voxels[:,1],
+            #     free_voxels[:,2]
+            # ] = 1
+
+            hit = ray_voxels[-1]
+
+            # mask_lidar[
+            #     hit[0],
+            #     hit[1],
+            #     hit[2]
+            # ] = 1
+
     return semantics, mask_lidar
 
 def transform_lidar_to_current_ego(
@@ -382,7 +489,8 @@ def collect_lidar_sweeps(nusc, sample, root):
     )
 
     all_points = []
-    all_labels = []
+    all_origins = []
+    # all_labels = []
 
     token = current_lidar_token
 
@@ -402,27 +510,27 @@ def collect_lidar_sweeps(nusc, sample, root):
             sd["filename"]
         )
 
-        seg_path = os.path.join(
-            root,
-            "lidarseg",
-            "v1.0-mini",
-            token + "_lidarseg.bin"
-        )
+        # seg_path = os.path.join(
+        #     root,
+        #     "lidarseg",
+        #     "v1.0-mini",
+        #     token + "_lidarseg.bin"
+        # )
 
         points = np.fromfile(
             lidar_path,
             dtype=np.float32
         ).reshape(-1, 5)[:, :3]
 
-        labels = np.fromfile(
-            seg_path,
-            dtype=np.uint8
-        )
+        # labels = np.fromfile(
+        #     seg_path,
+        #     dtype=np.uint8
+        # )
 
-        assert len(points) == len(labels), (
-            f"Points ({len(points)}) != "
-            f"labels ({len(labels)}) for {token}"
-        )
+        # assert len(points) == len(labels), (
+        #     f"Points ({len(points)}) != "
+        #     f"labels ({len(labels)}) for {token}"
+        # )
 
         points = transform_lidar_to_current_ego(
             points,
@@ -431,8 +539,61 @@ def collect_lidar_sweeps(nusc, sample, root):
             nusc
         )
 
+        # position of this sweep LiDAR sensor
+        # in the current ego coordinate system
+        calibrated_sensor = nusc.get(
+            "calibrated_sensor",
+            sd["calibrated_sensor_token"]
+        )
+
+        ego_pose = nusc.get(
+            "ego_pose",
+            sd["ego_pose_token"]
+        )
+
+        sensor_translation = np.array(
+            calibrated_sensor["translation"],
+            dtype=np.float64
+        )
+
+        ego_rotation = Quaternion(
+            ego_pose["rotation"]
+        )
+
+        ego_translation = np.array(
+            ego_pose["translation"],
+            dtype=np.float64
+        )
+
+        current_rotation = Quaternion(
+            current_ego_pose["rotation"]
+        )
+
+        current_translation = np.array(
+            current_ego_pose["translation"],
+            dtype=np.float64
+        )
+
+        # LiDAR sensor -> sweep ego -> global
+        origin_global = (
+            sensor_translation
+            @ ego_rotation.rotation_matrix.T
+        ) + ego_translation
+
+        # global -> current ego
+        origin_current = (
+            origin_global - current_translation
+        ) @ current_rotation.rotation_matrix
+
+        origins = np.repeat(
+            origin_current[None, :],
+            len(points),
+            axis=0
+        )
+
         all_points.append(points)
-        all_labels.append(labels)
+        all_origins.append(origins)
+        # all_labels.append(labels)
 
         print(
             "Loaded:",
@@ -450,16 +611,22 @@ def collect_lidar_sweeps(nusc, sample, root):
         axis=0
     )
 
-    all_labels = np.concatenate(
-        all_labels,
+    all_origins = np.concatenate(
+        all_origins,
         axis=0
     )
 
+    # all_labels = np.concatenate(
+    #     all_labels,
+    #     axis=0
+    # )
+
     print()
     print("Total accumulated points:", len(all_points))
-    print("Total labels:", len(all_labels))
+    print("Total accumulated origins:", len(all_origins))
+    # print("Total labels:", len(all_labels))
 
-    return all_points, all_labels
+    return all_points, all_origins
 
 def main():
 
@@ -474,17 +641,35 @@ def main():
     # First sample for debugging.
     sample = nusc.sample[0]
 
+    print()
+    print("=== TEST SWEEP ACCUMULATION ===")
+
+    sweep_points, sweep_origins = collect_lidar_sweeps(
+        nusc,
+        sample,
+        root
+    )
+
+    print("Accumulated points shape:", sweep_points.shape)
+
+    print("Accumulated origins shape:", sweep_origins.shape)
+    print("First point:", sweep_points[0])
+    print("First origin:", sweep_origins[0])
+
     points, labels = load_lidar_and_segmentation(
-    nusc,
-    sample["token"],
-    root
-)
+        nusc,
+        sample["token"],
+        root
+    )
+
     print("Loaded points:", points.shape)
     print("Loaded labels:", labels.shape)
 
     semantics, mask_lidar = lidar_seg_to_occ(
         points,
-        labels
+        labels,
+        extra_points=sweep_points,
+        extra_origins=sweep_origins
     )
 
     print("Occupancy shape:", semantics.shape)
