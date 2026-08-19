@@ -10,6 +10,14 @@ ego(t_лидара) -> global -> ego(t_камеры) -> камера-сенсо�
     красный -- в габарите (реальная помеха)
     синий   -- над габаритом (можно проехать под)
 
+Рисуем не облако точек, а закрашенный оверлей: воксели -- это регулярная
+решётка, и без учёта перекрытия (z-buffer) она при перспективной проекции
+даёт муар/веер из линий. Поэтому растеризуем в грубую сетку в пространстве
+картинки, в каждой ячейке оставляем ближайшую по глубине точку (дальние
+точки не должны быть видны из-за ближних), мелкие дыры от разрежения решётки
+на расстоянии закрываем (не дальше пары ячеек, чтобы не размазать настоящие
+границы) -- получается обычная полупрозрачная маска, как в сегментации.
+
 Запуск:
     cd ~/work/data
     python ~/work/occ_on_camera.py --ckpt occ_bevfusion.pth --cam CAM_FRONT
@@ -22,6 +30,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from pyquaternion import Quaternion
+from scipy.ndimage import distance_transform_edt
 
 from occ_baseline import VOX, X_MIN, Y_MIN, Z_MIN, z_index
 from occ_bevfusion import Occ3DCamDataset, BEVFusionOccNet
@@ -51,6 +60,35 @@ def ego_to_camera(centers_xyz, lidar_rec, cam_rec, nusc):
     return pts, cs_cam
 
 
+def rasterize(px, py, depths, colors_v, W, H, cell_px=9, max_fill=2, alpha=0.5):
+    """Точки (px,py,depth,цвет) -> полупрозрачная RGBA-маска размера (H,W).
+    Z-buffer по ячейкам грубой сетки + докраска мелких дыр ближайшим цветом."""
+    gw, gh = max(1, W // cell_px), max(1, H // cell_px)
+    cx = np.clip((px / W * gw).astype(np.int32), 0, gw - 1)
+    cy = np.clip((py / H * gh).astype(np.int32), 0, gh - 1)
+    cell = cy * gw + cx
+
+    order = np.argsort(-depths)                # дальние сначала -> ближние затирают их
+    cell_o, col_o = cell[order], colors_v[order]
+
+    canvas = np.zeros((gh * gw, 3), dtype=np.float32)
+    occ_mask = np.zeros(gh * gw, dtype=bool)
+    canvas[cell_o] = col_o
+    occ_mask[cell_o] = True
+    canvas = canvas.reshape(gh, gw, 3)
+    occ_mask = occ_mask.reshape(gh, gw)
+
+    dist, (near_y, near_x) = distance_transform_edt(~occ_mask, return_indices=True)
+    fillable = (~occ_mask) & (dist <= max_fill)
+    filled_mask = occ_mask | fillable
+    filled_canvas = canvas.copy()
+    filled_canvas[fillable] = canvas[near_y[fillable], near_x[fillable]]
+
+    rgba = np.dstack([filled_canvas, filled_mask.astype(np.float32) * alpha])
+    rgba_img = Image.fromarray((rgba * 255).astype(np.uint8), mode='RGBA')
+    return rgba_img.resize((W, H), Image.BILINEAR), filled_mask.sum(), gh * gw
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='occ3d-nus')
@@ -62,6 +100,8 @@ def main():
     ap.add_argument('--min-depth', type=float, default=1.0)
     ap.add_argument('--max-depth', type=float, default=45.0,
                      help='отсечь далёкие воксели -- иначе горизонт забивается точками')
+    ap.add_argument('--cell-px', type=int, default=9, help='размер ячейки растра в пикселях картинки')
+    ap.add_argument('--alpha', type=float, default=0.5)
     ap.add_argument('--out', default='occ_on_camera.png')
     args = ap.parse_args()
 
@@ -104,20 +144,28 @@ def main():
     K = np.array(cs_cam['camera_intrinsic'])
     points_2d = view_points(pts_cam[:3, :], K, normalize=True)
 
-    img = Image.open(os.path.join(args.root, cam_rec['filename']))
+    img = Image.open(os.path.join(args.root, cam_rec['filename'])).convert('RGB')
+    W, H = img.size
     mask = (depths > args.min_depth) & (depths < args.max_depth)
-    mask &= (points_2d[0] > 1) & (points_2d[0] < img.size[0] - 1)
-    mask &= (points_2d[1] > 1) & (points_2d[1] < img.size[1] - 1)
-    points_2d, colors_v = points_2d[:, mask], colors[mask]
+    mask &= (points_2d[0] > 0) & (points_2d[0] < W - 1)
+    mask &= (points_2d[1] > 0) & (points_2d[1] < H - 1)
+    px, py, d, col = points_2d[0][mask], points_2d[1][mask], depths[mask], colors[mask]
 
-    plt.figure(figsize=(12, 7))
-    plt.imshow(img)
-    plt.scatter(points_2d[0], points_2d[1], c=colors_v, s=1.5, alpha=0.45, linewidths=0)
-    plt.axis('off')
-    plt.title(f'{args.cam}: предсказанная occupancy-сетка ({os.path.basename(args.ckpt)})\n'
-              'зелёный — под колёсами, красный — габарит, синий — над габаритом')
-    plt.savefig(args.out, bbox_inches='tight', dpi=150)
-    print(f'готово: {args.out}, точек в кадре: {points_2d.shape[1]}')
+    overlay, filled, total = rasterize(px, py, d, col, W, H,
+                                        cell_px=args.cell_px, max_fill=2, alpha=args.alpha)
+
+    fig = plt.figure(figsize=(W / 150, (H + 90) / 150), dpi=150)
+    top_frac = 90 / (H + 90)
+    ax = fig.add_axes([0, 0, 1, 1 - top_frac])
+    ax.imshow(img)
+    ax.imshow(overlay)
+    ax.axis('off')
+    fig.text(0.5, 1 - top_frac / 2,
+              f'{args.cam}: предсказанная occupancy-сетка ({os.path.basename(args.ckpt)})\n'
+              'зелёный — под колёсами, красный — габарит, синий — над габаритом',
+              ha='center', va='center', fontsize=11)
+    fig.savefig(args.out, dpi=150)
+    print(f'готово: {args.out}, занятых ячеек растра: {filled}/{total}')
 
 
 if __name__ == '__main__':
