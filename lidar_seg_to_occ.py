@@ -116,11 +116,19 @@ def load_lidar_and_segmentation(nusc, sample_token, root):
         f"does not match number of labels ({len(labels)})"
     )
 
-    return points[:, :3], labels
+    # точки в .pcd.bin -- в системе координат самого сенсора LIDAR_TOP,
+    # а сетка occupancy -- в ego-системе; без этого transform всё было
+    # сдвинуто/повёрнуто мимо реальных вокселей (см. calibrated_sensor)
+    cs = nusc.get("calibrated_sensor", sample_data["calibrated_sensor_token"])
+    points_ego = points[:, :3] @ Quaternion(cs["rotation"]).rotation_matrix.T \
+        + np.array(cs["translation"])
+
+    return points_ego, labels
 
 def lidar_seg_to_occ(
     points,
     labels,
+    origin=None,
     extra_points=None,
     extra_origins=None
 ):
@@ -190,10 +198,12 @@ def lidar_seg_to_occ(
     )
 
     # --------------------------------------------------
-    # 2. LiDAR sensor is at the origin of LiDAR coords
+    # 2. origin -- позиция LIDAR-сенсора в ego-системе (не (0,0,0):
+    #    после fix'а points уже в ego, а не в системе сенсора)
     # --------------------------------------------------
 
-    origin = np.array([0.0, 0.0, 0.0])
+    if origin is None:
+        origin = np.array([0.0, 0.0, 0.0])
 
     # --------------------------------------------------
     # 3. Process each LiDAR ray
@@ -201,7 +211,7 @@ def lidar_seg_to_occ(
 
     for point, label in zip(points, labels):
 
-        distance = np.linalg.norm(point)
+        distance = np.linalg.norm(point - origin)
 
         if distance == 0:
             continue
@@ -218,7 +228,7 @@ def lidar_seg_to_occ(
 
         ray_points = (
             origin[None, :]
-            + ts[:, None] * point
+            + ts[:, None] * (point - origin)
         )
 
         ray_voxels = np.floor(
@@ -330,7 +340,7 @@ def lidar_seg_to_occ(
 
         for point, origin in zip(extra_points, extra_origins):
 
-            distance = np.linalg.norm(point)
+            distance = np.linalg.norm(point - origin)
 
             if distance == 0:
                 continue
@@ -384,25 +394,33 @@ def lidar_seg_to_occ(
 
             free_voxels = ray_voxels[:-1]
 
+            free_values = semantics[
+                free_voxels[:, 0],
+                free_voxels[:, 1],
+                free_voxels[:, 2]
+            ]
+
+            free_voxels = free_voxels[free_values == 0]
+
             semantics[
-                free_voxels[:,0],
-                free_voxels[:,1],
-                free_voxels[:,2]
+                free_voxels[:, 0],
+                free_voxels[:, 1],
+                free_voxels[:, 2]
             ] = 17
 
-            # mask_lidar[
-            #     free_voxels[:,0],
-            #     free_voxels[:,1],
-            #     free_voxels[:,2]
-            # ] = 1
+            mask_lidar[
+                free_voxels[:, 0],
+                free_voxels[:, 1],
+                free_voxels[:, 2]
+            ] = 1
 
             hit = ray_voxels[-1]
 
-            # mask_lidar[
-            #     hit[0],
-            #     hit[1],
-            #     hit[2]
-            # ] = 1
+            mask_lidar[
+                hit[0],
+                hit[1],
+                hit[2]
+            ] = 1
 
     return semantics, mask_lidar
 
@@ -492,7 +510,7 @@ def collect_lidar_sweeps(nusc, sample, root):
     all_origins = []
     # all_labels = []
 
-    token = current_lidar_token
+    token = current_sd["next"]
 
     while token:
 
@@ -665,9 +683,14 @@ def main():
     print("Loaded points:", points.shape)
     print("Loaded labels:", labels.shape)
 
+    sd_lidar = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
+    cs_lidar = nusc.get("calibrated_sensor", sd_lidar["calibrated_sensor_token"])
+    lidar_origin_ego = np.array(cs_lidar["translation"])
+
     semantics, mask_lidar = lidar_seg_to_occ(
         points,
         labels,
+        origin=lidar_origin_ego,
         extra_points=sweep_points,
         extra_origins=sweep_origins
     )

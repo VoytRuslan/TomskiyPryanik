@@ -100,17 +100,10 @@ class Occ3DFusionDataset(Occ3DDataset):
     (в отличие от лидарного бейзлайна с санити-режимом на голом GT).
     """
 
-<<<<<<< Updated upstream
-    def __init__(self, root='occ3d-nus', binary=True, limit=None, nusc=None):
-        # 'union': видно лидаром ИЛИ камерой -- обе модальности участвуют
-        # во входе, значит обеим и разрешаем учить таргет
-        super().__init__(root, binary, limit, nusc, vis_mask='union')
-=======
     def __init__(self, root='occ3d-nus', classes=3, limit=None, nusc=None):
         # 'union': видно лидаром ИЛИ камерой -- обе модальности участвуют
         # во входе, значит обеим и разрешаем учить таргет
         super().__init__(root, classes=classes, limit=limit, nusc=nusc, vis_mask='union')
->>>>>>> Stashed changes
         if nusc is None:
             raise ValueError('камерная fusion-ветка требует nuScenes devkit '
                               '(для лидарной абляции используйте --no-cam)')

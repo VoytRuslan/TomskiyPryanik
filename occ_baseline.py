@@ -134,14 +134,9 @@ class Occ3DDataset(Dataset):
     ray_iou.py) и эквивалентен classes=2/не-2.
     """
 
-<<<<<<< Updated upstream
-    def __init__(self, root='occ3d-nus', binary=True, limit=None, nusc=None, vis_mask='lidar'):
-        self.root, self.binary = root, binary
-=======
     def __init__(self, root='occ3d-nus', binary=True, classes=None, limit=None, nusc=None, vis_mask='lidar'):
         self.root = root
         self.classes = classes if classes is not None else (2 if binary else 18)
->>>>>>> Stashed changes
         self.files = sorted(glob.glob(os.path.join(root, 'gts', '*', '*', 'labels.npz')))
         if limit:
             self.files = self.files[:limit]
@@ -195,11 +190,7 @@ class Occ3DDataset(Dataset):
         elif self.classes == 3:
             tgt = np.where(sem == FREE, 0, np.where(dynamic_mask, 2, 1)).astype(np.int64)
         else:
-<<<<<<< Updated upstream
-            tgt = sem.astype(np.int64)
-=======
             tgt = sem.astype(np.int64)                       # полная семантика, 18 классов как есть
->>>>>>> Stashed changes
 
         # маски видимости обязательны: без них модель фантазирует
         # в ненаблюдаемом пространстве (см. CLAUDE.md, "критично помнить")
