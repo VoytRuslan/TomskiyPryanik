@@ -121,15 +121,32 @@ def lidar_to_bev(points):
 class Occ3DDataset(Dataset):
     """
     Читает gts/*/<token>/labels.npz и соответствующее лидарное облако.
-    binary=True -> таргет 0/1 (занято/свободно), это самый быстрый путь.
+
+    classes=2  -> таргет 0/1 (свободно/занято), динамика тоже "свободно"
+                  (простой бинарный путь, но противоречит входу -- лидар
+                  видит хит на месте машины, а таргет говорит "пусто")
+    classes=3  -> 0=свободно, 1=занято статикой, 2=занято динамикой --
+                  честная схема: не врём про динамику, а прямо её называем.
+                  Рекомендуемый режим, см. CLAUDE.md "динамику исключать".
+    иначе      -> полная семантика Occ3D как есть (18 классов)
+
+    binary=True/False оставлен для обратной совместимости (export_ply.py,
+    ray_iou.py) и эквивалентен classes=2/не-2.
     """
 
-    def __init__(self, root='occ3d-nus', binary=True, limit=None, nusc=None):
+<<<<<<< Updated upstream
+    def __init__(self, root='occ3d-nus', binary=True, limit=None, nusc=None, vis_mask='lidar'):
         self.root, self.binary = root, binary
+=======
+    def __init__(self, root='occ3d-nus', binary=True, classes=None, limit=None, nusc=None, vis_mask='lidar'):
+        self.root = root
+        self.classes = classes if classes is not None else (2 if binary else 18)
+>>>>>>> Stashed changes
         self.files = sorted(glob.glob(os.path.join(root, 'gts', '*', '*', 'labels.npz')))
         if limit:
             self.files = self.files[:limit]
         self.nusc = nusc
+        self.vis_mask = vis_mask   # 'lidar' | 'camera' | 'union' | None -- какую маску видимости брать
         assert self.files, f'не найдено labels.npz в {root}/gts'
 
     def __len__(self):
@@ -154,24 +171,49 @@ class Occ3DDataset(Dataset):
     def __getitem__(self, i):
         f = self.files[i]
         token = os.path.basename(os.path.dirname(f))
-        sem = np.load(f)['semantics']                       # (200,200,16)
+        npz = np.load(f)
+        sem = npz['semantics']                               # (200,200,16)
 
         pts = self._load_lidar(token)
         if pts is None:
             # запасной вариант: вход строим из самого GT (санити-режим,
             # проверяет, что модель и метрики работают, но не является
             # честной задачей — на защите так делать нельзя)
-            occ = (sem != FREE).astype(np.float32)
+            occ = ((sem != FREE) & ~np.isin(sem, DYNAMIC)).astype(np.float32)
             bev = np.zeros((Z_IN + 1, NX, NY), dtype=np.float32)
             bev[:Z_IN] = occ.transpose(2, 0, 1)
             bev[Z_IN] = occ.sum(2) / NZ
         else:
             bev = lidar_to_bev(pts)
 
-        if self.binary:
-            tgt = (sem != FREE).astype(np.int64)
+        # динамику не путаем со статикой -- проект про статику (см. CLAUDE.md,
+        # "критично помнить"). classes=3 говорит об этом прямо (класс 2),
+        # а не подменяет динамику на "свободно" вопреки тому, что видит лидар.
+        dynamic_mask = np.isin(sem, DYNAMIC)
+        if self.classes == 2:
+            tgt = ((sem != FREE) & ~dynamic_mask).astype(np.int64)
+        elif self.classes == 3:
+            tgt = np.where(sem == FREE, 0, np.where(dynamic_mask, 2, 1)).astype(np.int64)
         else:
+<<<<<<< Updated upstream
             tgt = sem.astype(np.int64)
+=======
+            tgt = sem.astype(np.int64)                       # полная семантика, 18 классов как есть
+>>>>>>> Stashed changes
+
+        # маски видимости обязательны: без них модель фантазирует
+        # в ненаблюдаемом пространстве (см. CLAUDE.md, "критично помнить")
+        if self.vis_mask == 'lidar':
+            vis = npz['mask_lidar'].astype(bool)
+        elif self.vis_mask == 'camera':
+            vis = npz['mask_camera'].astype(bool)
+        elif self.vis_mask == 'union':
+            vis = npz['mask_lidar'].astype(bool) | npz['mask_camera'].astype(bool)
+        else:
+            vis = None
+        if vis is not None:
+            tgt[~vis] = -100                                 # ignore_index в лоссе и метриках
+
         return torch.from_numpy(bev), torch.from_numpy(tgt)
 
 
@@ -191,7 +233,10 @@ def main():
     ap.add_argument('--batch', type=int, default=2)
     ap.add_argument('--lr', type=float, default=2e-3)
     ap.add_argument('--limit', type=int, default=None, help='взять только N кадров')
-    ap.add_argument('--classes', type=int, default=2, help='2 = бинарно, 18 = семантика')
+    ap.add_argument('--classes', type=int, default=3,
+                     help='2 = свободно/занято (динамика тоже "свободно"); '
+                          '3 = свободно/занято-статика/занято-динамика (рекомендуется); '
+                          '18 = полная семантика')
     ap.add_argument('--z-report', action='store_true', help='печатать разбивку IoU/Dice по всем 16 Z-слоям')
     ap.add_argument('--gauge-report', action='store_true',
                      help='печатать false-block/miss rate в % и кривую по габаритам 1.5-4 м')
@@ -208,7 +253,7 @@ def main():
     except Exception as e:
         print('ВНИМАНИЕ: devkit недоступен, вход строится из GT (санити-режим):', e)
 
-    ds = Occ3DDataset(args.root, binary=(args.classes == 2), limit=args.limit, nusc=nusc)
+    ds = Occ3DDataset(args.root, classes=args.classes, limit=args.limit, nusc=nusc)
     n_val = max(1, len(ds) // 5)
     tr, va = torch.utils.data.random_split(
         ds, [len(ds) - n_val, n_val], generator=torch.Generator().manual_seed(0))
@@ -224,6 +269,9 @@ def main():
     w = torch.ones(args.classes, device=dev)
     if args.classes == 2:
         w[1] = 5.0
+    elif args.classes == 3:
+        w[1] = 5.0   # занято статикой -- то, что реально нужно ловить
+        w[2] = 5.0   # занято динамикой -- редкий класс, но не игнорируем
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, args.lr, total_steps=args.epochs * max(len(dl_tr), 1))
@@ -236,7 +284,7 @@ def main():
             tgt = tgt.permute(0, 3, 1, 2)                    # (B,Z,H,W)
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=(dev == 'cuda')):
-                loss = F.cross_entropy(net(bev), tgt, weight=w)
+                loss = F.cross_entropy(net(bev), tgt, weight=w, ignore_index=-100)
             scaler.scale(loss).backward()
             scaler.step(opt); scaler.update(); sched.step()
             tot += loss.item()

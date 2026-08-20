@@ -72,9 +72,27 @@ class Metrics:
 
     @torch.no_grad()
     def update(self, logits, target):
-        """logits: (B, num_classes, Z, H, W); target: (B, Z, H, W)."""
+        """logits: (B, num_classes, Z, H, W); target: (B, Z, H, W).
+
+        target может содержать -100 (ignore_index) в вокселях вне маски
+        видимости -- такие воксели исключаются из всех метрик, а не
+        засчитываются как "свободно" (см. CLAUDE.md, "маски видимости").
+<<<<<<< Updated upstream
+        """
         pred = logits.argmax(1)                               # (B,Z,H,W)
-        p, t = pred > 0, target > 0
+        valid = target != -100
+        p, t = (pred > 0) & valid, (target > 0) & valid
+=======
+
+        "Занято" = класс 1. При classes=2 это единственный ненулевой класс
+        (эквивалент старого >0). При classes=3 класс 2 -- это динамика:
+        она не в счёт ни в pred, ни в target (не путаем с занятостью, но
+        и не подсовываем модели как "свободно" -- см. Occ3DDataset).
+        """
+        pred = logits.argmax(1)                               # (B,Z,H,W)
+        valid = target != -100
+        p, t = (pred == 1) & valid, (target == 1) & valid
+>>>>>>> Stashed changes
 
         self.inter += (p & t).sum().item()
         self.union += (p | t).sum().item()

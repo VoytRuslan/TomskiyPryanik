@@ -1,1 +1,8 @@
 data/
+
+__pycache__/
+*.pyc
+__pycache__/
+*.pyc
+*.log
+train_run_v3.log

@@ -74,7 +74,7 @@ def main():
     with torch.no_grad():
         pred = net(bev.unsqueeze(0)).argmax(1)[0]        # (Z, H, W)
 
-    gt_mask = tgt.numpy().astype(bool)                    # (H, W, Z)
+    gt_mask = tgt.numpy() == 1                            # (H, W, Z); -100 (ignore) не считаем занятым
     pred_mask = pred.numpy().transpose(1, 2, 0).astype(bool)
 
     save_voxels(gt_mask, os.path.join(args.out, 'gt.ply'), i_clear, i_top)
