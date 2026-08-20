@@ -1,10 +1,6 @@
-from mmengine.config import Config
-from mmdet3d.registry import MODELS
-import torch
-import numpy as np
 import sys
 sys.path.insert(0, '/home/voyrus/work/mmdet3d-repo')
-sys.path.insert(0, '/home/voyrus/work/FlashOCC')
+
 from mmengine.config import Config
 from mmdet3d.registry import MODELS
 import mmdet3d
@@ -13,11 +9,15 @@ import mmcv
 import torch
 import numpy as np
 
-# Импорт кастомных модулей
-from projects.mmdet3d_plugin.datasets import *
-from projects.mmdet3d_plugin.models import *
-from projects.mmdet3d_plugin.core import *
+# BEVFusionOcc/BEVOCCHead2D ничего не тянут из FlashOCC-плагина (mmdet3d_plugin) --
+# он тут был не нужен и просто не импортировался (36 сломанных импортов под
+# старый API mmdet3d/mmcv в другом submodule, не имеет отношения к этой модели)
+from mmdet3d.utils import register_all_modules
+register_all_modules()   # регистрирует стандартные компоненты mmdet3d (Det3DDataPreprocessor и т.п.) --
+                          # то, что обычно делает tools/train.py, но не делал этот скрипт
+
 from projects.BEVFusion.bevfusion import *
+from projects.BEVFusion.bevfusion.heads import *   # регистрирует BEVOCCHead2D и т.п.
 
 # Загружаем конфиг
 cfg = Config.fromfile('/home/voyrus/work/mmdet3d-repo/projects/BEVFusion/configs/bevfusion_occ_r50.py')
