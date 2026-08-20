@@ -68,10 +68,17 @@ class Occ3DCamDataset(Occ3DDataset):
     только собрать интринсику и camera->ego в 4x4-матрицы по формату BEVFusion.
     """
 
+<<<<<<< Updated upstream
     def __init__(self, root='occ3d-nus', binary=True, limit=None, nusc=None):
         # 'union': видно лидаром ИЛИ камерой -- обе модальности участвуют
         # во входе, значит обеим и разрешаем учить таргет
         super().__init__(root, binary, limit, nusc, vis_mask='union')
+=======
+    def __init__(self, root='occ3d-nus', classes=3, limit=None, nusc=None):
+        # 'union': видно лидаром ИЛИ камерой -- обе модальности участвуют
+        # во входе, значит обеим и разрешаем учить таргет
+        super().__init__(root, classes=classes, limit=limit, nusc=nusc, vis_mask='union')
+>>>>>>> Stashed changes
         if nusc is None:
             raise ValueError('камерная ветка требует nuScenes devkit '
                               '(для лидарной абляции используйте --no-cam)')
@@ -213,7 +220,10 @@ def main():
     ap.add_argument('--batch', type=int, default=2)
     ap.add_argument('--lr', type=float, default=2e-3)
     ap.add_argument('--limit', type=int, default=None)
-    ap.add_argument('--classes', type=int, default=2)
+    ap.add_argument('--classes', type=int, default=3,
+                     help='2 = свободно/занято (динамика тоже "свободно"); '
+                          '3 = свободно/занято-статика/занято-динамика (рекомендуется); '
+                          '18 = полная семантика')
     ap.add_argument('--no-cam', action='store_true',
                      help='абляция: 3D-conv голова без камеры (сравнение с fusion)')
     ap.add_argument('--unfreeze-backbone', action='store_true',
@@ -236,10 +246,10 @@ def main():
     nusc = NuScenes('v1.0-mini', dataroot=os.path.abspath(args.root), verbose=False)
 
     if args.no_cam:
-        ds = Occ3DDataset(args.root, binary=(args.classes == 2), limit=args.limit, nusc=nusc)
+        ds = Occ3DDataset(args.root, classes=args.classes, limit=args.limit, nusc=nusc)
         net = LidarOnlyOccNet(num_classes=args.classes).to(dev)
     else:
-        ds = Occ3DCamDataset(args.root, binary=(args.classes == 2), limit=args.limit, nusc=nusc)
+        ds = Occ3DCamDataset(args.root, classes=args.classes, limit=args.limit, nusc=nusc)
         net = BEVFusionOccNet(num_classes=args.classes,
                               freeze_backbone=not args.unfreeze_backbone).to(dev)
 
@@ -258,6 +268,9 @@ def main():
     w = torch.ones(args.classes, device=dev)
     if args.classes == 2:
         w[1] = 5.0
+    elif args.classes == 3:
+        w[1] = 5.0   # занято статикой
+        w[2] = 5.0   # занято динамикой
     opt = torch.optim.AdamW([p for p in net.parameters() if p.requires_grad],
                              lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(
